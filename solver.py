@@ -94,10 +94,17 @@ class Solver(object):
                 drop_last=False, speech_only=True)
 
         # get dev dataset
-        dev_set = self.config['dev_set']
+        clean_dev_set = self.config['clean_dev_set']
         # do not sort dev set
-        self.dev_dataset = PickleDataset(os.path.join(root_dir, f'{dev_set}.pkl'), sort=True)
-        self.dev_loader = get_data_loader(self.dev_dataset, 
+        self.clean_dev_dataset = PickleDataset(os.path.join(root_dir, f'{clean_dev_set}.pkl'), sort=True)
+        self.clean_dev_loader = get_data_loader(self.clean_dev_dataset, 
+                batch_size=self.config['batch_size'] // 2, 
+                shuffle=False, drop_last=False)
+        # get dev dataset
+        noisy_dev_set = self.config['noisy_dev_set']
+        # do not sort dev set
+        self.noisy_dev_dataset = PickleDataset(os.path.join(root_dir, f'{noisy_dev_set}.pkl'), sort=True)
+        self.noisy_dev_loader = get_data_loader(self.noisy_dev_dataset, 
                 batch_size=self.config['batch_size'] // 2, 
                 shuffle=False, drop_last=False)
         return
@@ -169,11 +176,11 @@ class Solver(object):
         cer = calculate_cer(prediction_sents, ground_truth_sents)
         return cer, prediction_sents, ground_truth_sents
 
-    def validation(self):
+    def validation(self, dev_loader):
         self.model.eval()
         all_predictions, all_ys = [], []
         total_loss = 0.
-        for step, data in enumerate(self.dev_loader):
+        for step, data in enumerate(dev_loader):
 
             xs, ilens, ys = to_gpu(data)
 
@@ -192,7 +199,7 @@ class Solver(object):
 
         self.model.train()
         # calculate loss
-        avg_loss = total_loss / len(self.dev_loader)
+        avg_loss = total_loss / len(dev_loader)
         cer, prediction_sents, ground_truth_sents = self.ind2sent(all_predictions, all_ys)
 
         return avg_loss, cer, prediction_sents, ground_truth_sents
@@ -344,7 +351,7 @@ class Solver(object):
             avg_train_loss = self.sup_train_one_epoch(epoch, tf_rate)
 
             # validation
-            avg_val_loss, cer, prediction_sents, ground_truth_sents = self.validation()
+            avg_val_loss, cer, prediction_sents, ground_truth_sents = self.validation(self.clean_dev_loader)
 
             print(f'Epoch: {epoch}, tf_rate={tf_rate:.3f}, train_loss={avg_train_loss:.4f}, '
                     f'valid_loss={avg_val_loss:.4f}, CER={cer:.4f}')

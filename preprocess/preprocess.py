@@ -70,7 +70,7 @@ if __name__ == '__main__':
     unlabeled = 'tr05_multi_noisy'
     dev = 'dt05_multi_isolated_1ch_track'
     test_real = 'et05_real_isolated_1ch_track'
-    test_real = 'et05_simu_isolated_1ch_track'
+    test_simu = 'et05_simu_isolated_1ch_track'
 
     non_char_syms = ['\'', '.', '-', '<space>', '<NOISE>']
     # dump dict
@@ -86,7 +86,7 @@ if __name__ == '__main__':
         pickle.dump(non_lang_syms, f)
     
     # process data
-    dsets = [labeled, unlabeled, dev, test]
+    dsets = [labeled, unlabeled, dev, test_real, test_simu]
     utterances = {}
     for i, dset in enumerate(dsets):
         print(f'processing {dset}...')
