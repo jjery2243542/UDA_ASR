@@ -9,7 +9,7 @@ if __name__ == '__main__':
 
     parser.add_argument('-config', '-c', default='config.yaml')
     parser.add_argument('--sup_pretrain', action='store_true')
-    parser.add_argument('--uda_train', action='store_true')
+    parser.add_argument('--ssl_train', action='store_true')
     parser.add_argument('--load_model', action='store_true')
     parser.add_argument('--test', action='store_true')
 
@@ -26,7 +26,7 @@ if __name__ == '__main__':
     if args.sup_pretrain:
         state_dict, cer = solver.sup_pretrain()
 
-    if args.uda_train:
+    if args.ssl_train:
         solver.ssl_train()
 
     if args.test:

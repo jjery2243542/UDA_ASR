@@ -7,7 +7,7 @@ load_optimizer: True
 dataset_root_dir: /storage/feature/wsj/processed/deltatrue
 vocab_path: /storage/feature/wsj/processed/deltatrue/vocab_dict.pkl
 non_lang_syms_path: /storage/feature/wsj/processed/deltatrue/non_lang_syms.pkl
-summary_steps: 500
+summary_steps: 50
 labeled_set: test_dev93 #train_si84
 unlabeled_set: test_dev93 #train_si284
 clean_dev_set: test_dev93
@@ -47,6 +47,8 @@ gaussian_epoch: 20
 learning_rate: 0.0005
 lr_gamma: 0.2
 epochs: 50
+ssl_iterations: 75000
 change_learning_rate_epoch: 100
 encoder_iterations: 4
+unsup_weight: 0.01
 sample: False

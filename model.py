@@ -320,7 +320,7 @@ class Decoder(torch.nn.Module):
         self.attention.reset()
 
         # loop for each timestep
-        olength = max_dec_timesteps if not ys else olength
+        olength = max_dec_timesteps if ys is None else olength
         for t in range(olength):
             # supervised learning: using teacher forcing
             if ys is not None:
@@ -349,7 +349,7 @@ class Decoder(torch.nn.Module):
         log_probs = F.log_softmax(logits, dim=2)
         prediction = torch.stack(prediction, dim=1)
         ws = torch.stack(ws, dim=1)
-        if ys:
+        if ys is not None:
             ys_log_probs = torch.gather(log_probs, dim=2, index=pad_ys_out.unsqueeze(2)).squeeze(2)
         else:
             ys_log_probs = torch.gather(log_probs, dim=2, index=prediction.unsqueeze(2)).squeeze(2)
@@ -474,10 +474,10 @@ class MultiDecE2E(torch.nn.Module):
             else:
                 # using prediction from the first decoder as the input 
                 aux_logits, aux_log_probs, aux_prediction, aux_ws = self.aux_decoder(enc_h, enc_lens, 
-                        ys=prediction, 
+                        ys=prediction[:, :-1], 
                         tf_rate=tf_rate, max_dec_timesteps=max_dec_timesteps, 
                         sample=sample, label_smoothing=label_smoothing)
-        return (logits, log_probs, prediction, ws), (aux_logits, aux_log_probs, aux_predictions, aux_ws)
+        return (logits, log_probs, prediction, ws), (aux_logits, aux_log_probs, aux_prediction, aux_ws)
 
     def mask_and_cal_loss(self, log_probs, ys, mask=None):
         # add 1 to EOS

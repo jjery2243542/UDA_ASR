@@ -204,11 +204,11 @@ class Solver(object):
 
         return avg_loss, cer, prediction_sents, ground_truth_sents
 
-    def multi_dec_validation(self):
+    def multi_dec_validation(self, dev_loader):
         self.model.eval()
-        primal_predictions, aux_predictitions, all_ys = [], [], []
+        primal_predictions, aux_predictions, all_ys = [], [], []
         primal_total_loss, aux_total_loss = 0., 0.
-        for step, data in enumerate(self.dev_loader):
+        for step, data in enumerate(dev_loader):
 
             xs, ilens, ys = to_gpu(data)
 
@@ -235,11 +235,10 @@ class Solver(object):
 
         self.model.train()
         # calculate loss
-        primal_avg_loss = primal_total_loss / len(self.dev_loader)
-        aux_avg_loss = aux_total_loss / len(self.dev_loader)
+        primal_avg_loss = primal_total_loss / len(dev_loader)
+        aux_avg_loss = aux_total_loss / len(dev_loader)
 
         cer, prediction_sents, ground_truth_sents = self.ind2sent(primal_predictions, all_ys)
-
         return primal_avg_loss, aux_avg_loss, cer, prediction_sents, ground_truth_sents
 
     def test(self, state_dict=None):
@@ -301,7 +300,12 @@ class Solver(object):
                 gau = cc(torch.from_numpy(np.array(gau, dtype=np.float32)))
                 xs = xs + gau
             # input the model
-            _, log_probs, _, _ = self.model(xs, ilens, ys, tf_rate=tf_rate, sample=False)
+            if not self.config['multi_dec']:
+                _, log_probs, _, _ = self.model(xs, ilens, ys, tf_rate=tf_rate, sample=False)
+            else:
+                (_, log_probs, _, _), (_, aux_log_probs, _, _) = \
+                        self.model(xs, ilens, ys, tf_rate=tf_rate, sample=False)
+                log_probs = log_probs + aux_log_probs
 
             # mask and calculate loss
             loss = -torch.mean(log_probs)
@@ -351,7 +355,11 @@ class Solver(object):
             avg_train_loss = self.sup_train_one_epoch(epoch, tf_rate)
 
             # validation
-            avg_val_loss, cer, prediction_sents, ground_truth_sents = self.validation(self.clean_dev_loader)
+            if not self.config['multi_dec']:
+                avg_val_loss, cer, prediction_sents, ground_truth_sents = self.validation(self.clean_dev_loader)
+            else:
+                avg_val_loss, _, cer, prediction_sents, ground_truth_sents = \
+                        self.multi_dec_validation(self.clean_dev_loader)
 
             print(f'Epoch: {epoch}, tf_rate={tf_rate:.3f}, train_loss={avg_train_loss:.4f}, '
                     f'valid_loss={avg_val_loss:.4f}, CER={cer:.4f}')
@@ -391,9 +399,9 @@ class Solver(object):
         # minimizing the discrepency for the two decoders
         discrepency = torch.abs(distr - aux_distr)
         # generate mask by set <EOS> to 0
-        mask = (predictions != self.vocab['<EOS>']).float()
+        mask = (predictions != self.vocab['<EOS>']).float().unsqueeze(dim=-1)
         # averaging the output with mask
-        dis = torch.sum(discrepency * mask) / torch.sum(mask)
+        dis = torch.sum(discrepency * mask) / (torch.sum(mask) + 1e-20)
         return dis
 
     def ssl_train_one_iteration(self, iteration):
@@ -411,57 +419,62 @@ class Solver(object):
         primal_loss = -torch.mean(log_probs)
         aux_loss = -torch.mean(aux_log_probs)
         sup_loss = primal_loss + aux_loss
-        self.model.zero_grad()
-        sup_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config['max_grad_norm'])
-        self.gen_opt.step()
-
-        meta = {'ssl_source/sup_loss': sup_loss.item(),
-                'ssl_source/primal_loss': primal_loss.item()}
-        # add to logger
-        self.logger.scalar_summary(f'{tag}/ssl_source/sup_loss', sup_loss.item(), iteration + 1)
-        self.logger.scalar_summary(f'{tag}/ssl_source/primal_loss', primal_loss.item(), iteration + 1)
-        self.logger.scalar_summary(f'{tag}/ssl_source/aux_loss', aux_loss.item(), iteration + 1)
         
         # train on the source data, and the decoders to maximize the discrepency
-        (_, log_probs, _, _), (_, aux_log_probs, _, _) = self.model(lab_xs, lab_ilens, ys=lab_ys, 
-                tf_rate=1.0, sample=False, label_smoothing=True)
-        primal_loss = -torch.mean(log_probs)
-        aux_loss = -torch.mean(aux_log_probs)
-        sup_loss = primal_loss + aux_loss
-        (logits, _, predictions, _), (aux_logits, _, _, _) = self.model(unlab_xs, 
-            unlab_ilens, ys=None, tf_rate=1.0, sample=self.config['sample'], label_smoothing=False)
+        (logits, _, predictions, _), (aux_logits, _, _, _) = self.model(unlab_xs, unlab_ilens, ys=None, 
+                max_dec_timesteps=int(self.proportion * unlab_xs.size(1)), 
+                tf_rate=1.0, sample=self.config['sample'], label_smoothing=False, dec_only=True)
         dis_loss = self.discrepency(logits, aux_logits, predictions)
-        loss = sup_loss - dis_loss
+        loss = sup_loss - self.config['unsup_weight'] * dis_loss
         self.model.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config['max_grad_norm'])
-        self.dec_opt.step()
-        # add to logger
-        self.logger.scalar_summary(f'{tag}/ssl_decoder/sup_loss', sup_loss.item(), iteration + 1)
-        self.logger.scalar_summary(f'{tag}/ssl_decoder/primal_loss', primal_loss.item(), iteration + 1)
-        self.logger.scalar_summary(f'{tag}/ssl_decoder/aux_loss', aux_loss.item(), iteration + 1)
-        self.logger.scalar_summary(f'{tag}/ssl_decoder/discrepency', dis_loss.item(), iteration + 1)
+        self.gen_opt.step()
+
+        dec_meta = {'ssl_decoder/sup_loss': sup_loss.item(),
+                    'ssl_decoder/primal_loss': primal_loss.item(),
+                    'ssl_decoder/aux_loss': aux_loss.item(),
+                    'ssl_decoder/discrepency': dis_loss.item()}
 
         # train the encoder to minimize the discrepency
         for enc_step in range(self.config['encoder_iterations']):
-            (logits, _, predictions, _), (aux_logits, _, _, _) = self.model(unlab_xs, 
-                unlab_ilens, ys=None, tf_rate=1.0, sample=self.config['sample'], label_smoothing=False)
-            dis_loss = self.discrepency(logits, aux_logits, predictions)
-            self.model.zero_grad()
-            dis_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config['max_grad_norm'])
-            self.enc_opt.step()
-        # add to logger
-        self.logger.scalar_summary(f'{tag}/ssl_encoder/discrepency', dis_loss.item(), iteration + 1)
+            # drawn from labeled and unlabeled data
+            lab_data, unlab_data = next(self.lab_iter), next(self.unlab_iter)
 
+            # transfer to GPU
+            lab_xs, lab_ilens, lab_ys = to_gpu(lab_data)
+            unlab_xs, unlab_ilens = unlab_data
+            unlab_xs = cc(unlab_xs)
+            (_, log_probs, _, _), (_, aux_log_probs, _, _) = self.model(lab_xs, lab_ilens, ys=lab_ys, 
+                    tf_rate=1.0, sample=False, label_smoothing=True)
+            primal_loss = -torch.mean(log_probs)
+            aux_loss = -torch.mean(aux_log_probs)
+            sup_loss = primal_loss + aux_loss
+            (logits, _, predictions, _), (aux_logits, _, _, _) = self.model(unlab_xs, 
+                unlab_ilens, ys=None, tf_rate=1.0, sample=self.config['sample'], 
+                max_dec_timesteps=int(self.proportion * unlab_xs.size(1)), 
+                label_smoothing=False, enc_only=True)
+            dis_loss = self.discrepency(logits, aux_logits, predictions)
+            loss = sup_loss + self.config['unsup_weight'] * dis_loss
+            self.model.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config['max_grad_norm'])
+            self.gen_opt.step()
+        enc_meta = {'ssl_encoder/discrepency': dis_loss.item()}
+        meta = {**dec_meta, **enc_meta}
+
+        # add to logger
+        tag = self.config['tag']
+        for key, value in meta.items():
+            self.logger.scalar_summary(tag=f'{tag}/{key}', value=value, step=iteration) 
         return meta 
 
     def ssl_train(self):
         print('--------SSL training--------')
         # adjust learning rate
-        adjust_learning_rate(self.gen_opt, self.config['g_learning_rate'])
-        print(self.gen_opt)
+
+        #adjust_learning_rate(self.gen_opt, self.config['g_learning_rate'])
+        #print(self.gen_opt)
 
         best_cer = 2
         best_model = None
@@ -474,19 +487,25 @@ class Solver(object):
         for step in range(total_steps):
             meta = self.ssl_train_one_iteration(iteration=step)
             # printed message 
-            sup_loss, unsup_loss, loss = meta['sup_loss'], meta['unsup_loss'], meta['loss']
-            print(f'[{step + 1}/{total_steps}], sup_loss: {sup_loss:.3f}, unsup_loss: {unsup_loss:.3f}, '
-                    f'loss: {loss:.3f}', end='\r')
+            sup_loss = meta['ssl_decoder/sup_loss']
+            dec_dis = meta['ssl_decoder/discrepency']
+            enc_dis = meta['ssl_encoder/discrepency']
+
+            print(f'[{step + 1}/{total_steps}], sup_loss: {sup_loss:.3f}, dec_dis: {dec_dis:.3f}, '
+                    f'enc_dis: {enc_dis:.3f}', end='\r')
 
             if (step + 1) % self.config['summary_steps'] == 0 or step + 1 == total_steps:
-                avg_valid_loss, cer, prediction_sents, ground_truth_sents = self.validation()
+                primal_avg_val_loss, aux_avg_val_loss, cer, prediction_sents, ground_truth_sents = \
+                        self.multi_dec_validation(self.clean_dev_loader)
 
-                print(f'Iter: [{step + 1}/{total_steps}], valid_loss={avg_valid_loss:.4f}, CER={cer:.4f}')
+                print(f'Iter: [{step + 1}/{total_steps}], primal_val_loss={primal_avg_val_loss:.3f}, '
+                        f'aux_val_loss={aux_avg_val_loss:.3f}, CER={cer:.3f}')
 
                 # add to tensorboard
                 tag = self.config['tag']
                 self.logger.scalar_summary(f'{tag}/ssl/cer', cer, step + 1)
-                self.logger.scalar_summary(f'{tag}/ssl/val_loss', avg_valid_loss, step + 1)
+                self.logger.scalar_summary(f'{tag}/ssl/primal_val_loss', primal_avg_val_loss, step + 1)
+                self.logger.scalar_summary(f'{tag}/ssl/aux_val_loss', aux_avg_val_loss, step + 1)
 
                 # only add first n samples
                 lead_n = 5
@@ -503,9 +522,8 @@ class Solver(object):
                     model_path = os.path.join(self.config['model_dir'], self.config['model_name'])
                     best_cer = cer
                     self.save_model(model_path)
-                    self.save_judge(model_path)
                     best_model = self.model.state_dict()
-                    print(f'Save #{step} model, val_loss={avg_valid_loss:.3f}, CER={cer:.3f}')
+                    print(f'Save #{step} model, val_loss={primal_avg_val_loss:.3f}, CER={cer:.3f}')
                     print('-----------------')
         
 if __name__ == '__main__':
